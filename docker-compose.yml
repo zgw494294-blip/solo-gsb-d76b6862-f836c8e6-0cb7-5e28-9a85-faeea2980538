@@ -4,4 +4,12 @@ services:
     container_name: lap-judge
     ports:
       - "8000:8000"
+    environment:
+      # 成绩公告的 SQLite 库文件放在数据卷中，跨重启/重建容器保留。
+      - BULLETIN_DB_PATH=/data/bulletins.db
+    volumes:
+      - bulletin-data:/data
     restart: unless-stopped
+
+volumes:
+  bulletin-data:

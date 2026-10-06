@@ -1,8 +1,10 @@
-"""FastAPI 入口：提供裁决 API、设备日志合并预览 API 与静态页面。"""
+"""FastAPI 入口：提供裁决 API、设备日志合并预览 API、成绩公告 API 与静态页面。"""
 
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -10,11 +12,34 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .adjudication import AdjudicationError, adjudicate, diagnose, find_missing
+from .bulletin import (
+    BulletinConflict,
+    BulletinError,
+    BulletinStore,
+    publish_bulletin,
+)
 from .merge import MergeError, preview_merge
 
-app = FastAPI(title="本地赛道计次裁决台", version="1.3.0")
+app = FastAPI(title="本地赛道计次裁决台", version="1.4.0")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+# 成绩公告的 SQLite 存储：默认放在项目 data/ 目录（Docker 中由 Compose
+# 通过 BULLETIN_DB_PATH 指到数据卷 /data/bulletins.db），跨重启保留。
+# 懒加载：只有真正访问公告端点时才创建库文件，不影响既有端点与测试。
+_bulletin_store: BulletinStore | None = None
+_bulletin_store_lock = threading.Lock()
+
+
+def get_bulletin_store() -> BulletinStore:
+    global _bulletin_store
+    with _bulletin_store_lock:
+        if _bulletin_store is None:
+            path = os.environ.get("BULLETIN_DB_PATH") or str(
+                Path(__file__).resolve().parent.parent / "data" / "bulletins.db"
+            )
+            _bulletin_store = BulletinStore(path)
+    return _bulletin_store
 
 
 @app.post("/api/adjudicate")
@@ -122,6 +147,61 @@ async def api_import_confirm(
     只有输入与预览所依据的当前记录、文件内容一致时结果才会与预览相同。
     """
     return await _handle_merge_request(context, file)
+
+
+@app.post("/api/bulletins/publish")
+async def api_bulletin_publish(request: Request) -> JSONResponse:
+    """发布成绩公告：以点击时快照提交完整裁决输入、隔离、已保存复核、罚秒
+    与所见公告版本（首次为 0）。服务端重新裁决并逐趟核对复核（每趟均须
+    “通过”，零次无需复核），罚秒/原因/备注沿用原校验，名次按原规则在服务
+    端生成；只有所见版本与当前最新版本一致时才保存为下一版本并返回公告
+    链接。过期返回 409；任何失败都不留版本、也不改动现有公告。
+    """
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400, content={"ok": False, "error": "请求体不是合法的 JSON"}
+        )
+    try:
+        result = publish_bulletin(payload, get_bulletin_store())
+    except BulletinConflict as exc:
+        # 同版本并发发布只有一项成功；过期发布不留版本、不改现公告。
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "error": f"{exc}，本次未发布；请基于最新版本重新发布",
+                "currentVersion": exc.current_version,
+            },
+        )
+    except (BulletinError, AdjudicationError) as exc:
+        # 非法输入/未知选手处罚/不匹配复核：整次拒绝，不留版本。
+        return JSONResponse(status_code=422, content={"ok": False, "error": str(exc)})
+    return JSONResponse(content={"ok": True, "result": result})
+
+
+@app.get("/api/bulletins/{number}")
+async def api_bulletin_read(number: str, version: str | None = None) -> JSONResponse:
+    """按编号与可选版本读取成绩公告（只读）；缺省读最新版本。
+
+    旧版本永久只读：后续编辑、清空与刷新都不影响已发布的公告。
+    未知编号或版本返回 404。
+    """
+    parsed_version: int | None = None
+    if version is not None:
+        if not version.isascii() or not version.isdigit() or int(version) <= 0:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "版本号必须是正整数"},
+            )
+        parsed_version = int(version)
+    bulletin = get_bulletin_store().read(number, parsed_version)
+    if bulletin is None:
+        return JSONResponse(
+            status_code=404, content={"ok": False, "error": "公告不存在"}
+        )
+    return JSONResponse(content={"ok": True, "result": bulletin})
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

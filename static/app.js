@@ -1599,6 +1599,194 @@ if (missingBox) {
   });
 }
 
+/* ---------- 成绩公告（发布为独立的只读公告；服务端持久化，跨重启保留） ---------- */
+
+// 公告卡独立于裁决生命周期：不按输入变化清除，发布响应也不改写编辑区、结果区、
+// 复核、罚秒、诊断与漏读。点击“发布”时取当下完整快照（完整裁决输入含隔离、
+// 已保存复核、已保存罚秒、所见公告版本）经 HTTP 提交；服务端重新裁决并逐趟
+// 核对复核（每趟均须“通过”，零次无需复核）、按原校验检查罚秒与原因、按原
+// 规则生成名次，版本匹配才保存为下一版本并返回公告链接。
+// 公告状态机（bulletinState.status）：idle / loading / done / error。
+const bulletinBox = document.getElementById("bulletin-box");
+let bulletinState = { status: "idle" };
+// 每个公告编号各自追踪“所见公告版本”：首次发布为 0；发布成功后更新为已发布
+// 版本，409 冲突时采用服务端返回的当前最新版本。仅页面内存，刷新后回到 0。
+const bulletinVersions = new Map(); // number -> version
+let bulletinNumber = ""; // 公告编号输入框的原文（重绘时恢复）
+
+// 仅供无浏览器生命周期测试直接读取/驱动发布。
+if (typeof globalThis !== "undefined") {
+  globalThis.__getBulletinStateForTest = () => bulletinState;
+  globalThis.__runBulletinPublishForTest = () => runBulletinPublish();
+  globalThis.__bulletinVersionsForTest = bulletinVersions;
+}
+
+// 已保存复核的快照：从绑定键还原 选手 + 三条记录的 ID/门/秒数（规范十进制
+// 字符串，任意大的编号与秒数全程无损），服务端按同一四元组核对采纳趟。
+function collectBulletinReviews() {
+  const out = [];
+  for (const [key, saved] of reviews) {
+    let parts;
+    try {
+      parts = JSON.parse(key);
+    } catch (err) {
+      continue; // 结构不符的键不参与发布（正常不会出现）
+    }
+    const [runner, s, m, f] = parts;
+    out.push({
+      runner,
+      records: [
+        { id: s[0], gate: s[1], time: s[2] },
+        { id: m[0], gate: m[1], time: m[2] },
+        { id: f[0], gate: f[1], time: f[2] },
+      ],
+      status: saved.status,
+      note: saved.note,
+    });
+  }
+  return out;
+}
+
+// 已保存罚秒的快照：编号为规范十进制字符串，罚秒与原因原样提交，服务端按
+// 原校验复核（非负整数、原因至多 200 字、罚秒大于 0 时原因必填）。
+function collectBulletinPenalties() {
+  return [...penalties.entries()].map(([runner, saved]) => ({
+    runner,
+    seconds: saved.seconds,
+    reason: saved.reason,
+  }));
+}
+
+async function runBulletinPublish() {
+  if (!bulletinBox || bulletinState.status === "loading") return;
+  const inputEl = bulletinBox.querySelector(".bulletin-number");
+  if (inputEl) bulletinNumber = inputEl.value;
+  const number = bulletinNumber.trim();
+  if (number === "") {
+    bulletinState = { status: "error", message: "公告编号不能为空" };
+    paintBulletin();
+    return;
+  }
+  // 点击时快照：完整裁决输入（含隔离 ID 列表）、已保存复核、已保存罚秒与
+  // 该编号当前所见公告版本（首次为 0）。
+  const snapshot = {
+    number,
+    baseVersion: bulletinVersions.get(number) || 0,
+    input: collectPayload(),
+    reviews: collectBulletinReviews(),
+    penalties: collectBulletinPenalties(),
+  };
+  bulletinState = { status: "loading" };
+  paintBulletin();
+
+  let resp;
+  let data;
+  try {
+    resp = await fetch("/api/bulletins/publish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(snapshot),
+    });
+    data = parseJsonLossless(await resp.text());
+  } catch (err) {
+    bulletinState = { status: "error", message: `无法连接公告服务：${err.message}` };
+    paintBulletin();
+    return;
+  }
+  if (resp.status === 409) {
+    // 过期发布：采用服务端返回的当前最新版本作为新的所见版本，便于再次发布。
+    if (data && typeof data.currentVersion === "number") {
+      bulletinVersions.set(number, data.currentVersion);
+    }
+    bulletinState = {
+      status: "error",
+      message: (data && data.error) || "公告版本已变化，本次未发布；请重新发布",
+    };
+    paintBulletin();
+    return;
+  }
+  if (!resp.ok || !data.ok) {
+    bulletinState = {
+      status: "error",
+      message: (data && data.error) || `发布失败（HTTP ${resp.status}）`,
+    };
+    paintBulletin();
+    return;
+  }
+  const result = data.result || {};
+  const version =
+    typeof result.version === "string" ? Number(result.version) : result.version;
+  bulletinVersions.set(number, version);
+  bulletinState = {
+    status: "done",
+    number: typeof result.number === "string" ? result.number : number,
+    version,
+    url: typeof result.url === "string" ? result.url : "",
+  };
+  paintBulletin();
+}
+
+function bulletinStatusHtml() {
+  switch (bulletinState.status) {
+    case "loading":
+      return `
+        <div class="diag-loading bulletin-status">
+          <span class="diag-spinner" aria-hidden="true"></span>
+          正在经 HTTP 发布成绩公告…（服务端重新裁决并核对复核与罚秒）
+        </div>`;
+    case "error":
+      return `<div class="diag-error bulletin-status">⚠ ${escapeHtml(bulletinState.message)}</div>`;
+    case "done":
+      return `
+        <div class="import-done bulletin-status">
+          ✓ 公告 ${escapeHtml(bulletinState.number)} 已发布为版本 ${bulletinState.version}（只读，跨重启保留）：
+          <a class="bulletin-link" href="${escapeAttr(bulletinState.url)}" target="_blank" rel="noopener">${escapeHtml(bulletinState.url)}</a>
+        </div>`;
+    default:
+      return "";
+  }
+}
+
+function paintBulletin() {
+  if (!bulletinBox) return; // 旧生命周期测试的 DOM 桩没有公告卡：不重绘
+  const loading = bulletinState.status === "loading";
+  bulletinBox.innerHTML = `
+    <section class="result-card bulletin-card">
+      <div class="result-head">
+        <h3>成绩公告（发布为只读公告）</h3>
+        <span class="review-scope">发布后只读并跨重启保留；后续编辑、清空与刷新不影响已发布的公告</span>
+      </div>
+      <p class="diag-intro">
+        以点击时的完整裁决输入（含隔离）、已保存复核与罚秒为快照发布；服务端重新裁决并逐趟核对复核
+        （每趟均须“通过”，零次无需复核），罚秒与原因沿用原校验，名次按原规则在服务端生成。
+        同一编号首次发布为版本 1；再次发布须基于最新版本，过期将被拒绝（409）。
+      </p>
+      <div class="bulletin-controls">
+        <input type="text" class="bulletin-number" value="${escapeAttr(bulletinNumber)}"
+          placeholder="公告编号（非空，如 2026-001）" ${loading ? "disabled" : ""} />
+        <button type="button" class="btn primary bulletin-publish" ${loading ? "disabled" : ""}>📣 发布成绩公告</button>
+      </div>
+      ${bulletinStatusHtml()}
+    </section>`;
+  bulletinBox.hidden = false;
+}
+
+// 公告卡事件委托：编号输入只登记原文（不触发任何重算），点击按钮发起发布。
+// 公告卡位于表单之外，输入编号不会引起自动重算；发布响应也不改写编辑区。
+if (bulletinBox) {
+  bulletinBox.addEventListener("input", (e) => {
+    if (e.target.classList && e.target.classList.contains("bulletin-number")) {
+      bulletinNumber = e.target.value;
+    }
+  });
+  bulletinBox.addEventListener("click", (e) => {
+    if (!e.target.classList.contains("bulletin-publish")) return;
+    if (bulletinState.status === "loading") return;
+    runBulletinPublish();
+  });
+  paintBulletin();
+}
+
 /* ---------- 设备感应日志 CSV 并入（HTTP 预览 → 确认后才追加） ---------- */
 
 // 导入状态机（importState）：

@@ -1,8 +1,8 @@
 # 本地赛道计次裁决台
 
-一个完全本地运行的赛道计次（lap counting）裁决工具：录入 1～3 名选手、两段合格耗时区间与至多 40 条感应记录，自动为每名选手选出最优的完整计次方案；并可把**设备导出的感应日志（UTF-8 CSV）经 HTTP 预览后并入当前记录表**；还可在结果区对未采纳记录发起 HTTP“替代性诊断”，逐条判定同优可替代 / 仅次优可用 / 无法成趟；另提供**“查找漏读”**：推测只补一条读数就能多完成一趟的时间窗。对暂时存疑的感应记录，可在页面每行**隔离/重新纳入**，原始读数保留在表中、计算只用未隔离记录（裁决、诊断、漏读均支持可选 `excludedIds`）。
+一个完全本地运行的赛道计次（lap counting）裁决工具：录入 1～3 名选手、两段合格耗时区间与至多 40 条感应记录，自动为每名选手选出最优的完整计次方案；并可把**设备导出的感应日志（UTF-8 CSV）经 HTTP 预览后并入当前记录表**；还可在结果区对未采纳记录发起 HTTP“替代性诊断”，逐条判定同优可替代 / 仅次优可用 / 无法成趟；另提供**“查找漏读”**：推测只补一条读数就能多完成一趟的时间窗。对暂时存疑的感应记录，可在页面每行**隔离/重新纳入**，原始读数保留在表中、计算只用未隔离记录（裁决、诊断、漏读均支持可选 `excludedIds`）。复核全部“通过”后，可把当前裁决**发布为独立的只读成绩公告**：服务端重新裁决并核对复核与罚秒、按原规则生成名次，按编号版本化保存进 SQLite（Compose 数据卷跨重启保留），经 HTTP 按编号与可选版本读取。
 
-- 后端：Python + FastAPI（`app/`）
+- 后端：Python + FastAPI（`app/`），成绩公告用 SQLite 持久化（`app/bulletin.py`）
 - 前端：原生 HTML / CSS / JavaScript，无构建步骤（`static/`）
 - 裁决算法：枚举合法趟 + DAG 动态规划（`bisect` 二分前驱），含 400 组随机数据对拍测试
 - 诊断算法：在同一合法趟 DAG 上做前缀/后缀最优 DP，求“包含指定趟”的最优完整链；另含 500 组随机数据与暴力 DFS 的对拍
@@ -57,6 +57,20 @@
 - **设备日志合并不受隔离影响**：合并仍对**完整原表**做去重、冲突检测与计数——被隔离的 ID 与文件内容冲突仍整批拒绝，隔离记录仍占用 40 条名额，隔离不能跳过冲突或绕过限额；导入 context 不携带 `excludedIds`。
 - 三个计算端点（`/api/adjudicate`、`/api/diagnose`、`/api/missing`）都接收可选的 `excludedIds` 数组：**缺省或为空数组时行为与不传完全一致**；数组元素必须是去空白后**不重复的现有记录 ID**，否则返回 `422`。完整输入与 40 条限额仍先按原规则校验，非法输入不会因为隔离而变合法。
 
+## 成绩公告（只读发布，SQLite 持久化，版本化读取）
+
+页面底部的**“成绩公告”**卡可把通过复核的裁决发布为独立的只读公告：填写**非空公告编号**后点击 **📣 发布成绩公告**，页面以**点击时的快照**提交——完整裁决输入（含隔离 `excludedIds`）、已保存复核、已保存罚秒与**所见公告版本**（该编号首次发布为 0）。
+
+- **服务端重新裁决，不信任页面缓存**：对提交的完整输入按原规则重新计算采纳方案，并逐条核对复核——按**选手 + 三条记录的 ID/门/秒数**匹配到被采纳的趟（两段区间由重新裁决保证）；**每趟均须“通过”**（状态为未复核/存疑、缺少某趟复核、复核与采纳趟不匹配都整次拒绝），**零次选手无需复核**；
+- **备注、罚秒及原因沿用原校验**：备注/原因至多 200 字、罚秒非负整数、罚秒大于 0 时原因必填；**未知选手处罚**整次拒绝；
+- **名次按原规则在服务端生成**：计次数降序、调整后用时（原总用时 + 罚秒）升序、并列共享名次跳号、零次者末尾无名次；
+- **版本匹配才保存**：所见版本与当前最新版本一致时，把输入、采纳方案、复核、处罚及名次一起保存为下一版本并返回公告链接；**同版本并发发布只有一项成功**，过期返回 `409`（响应含 `currentVersion`，页面据此更新所见版本后可再次发布）；**任何失败都不留版本、也不改动现有公告**；
+- **公告永久只读**：按编号与可选版本经 HTTP 读取，缺省读最新，未知编号/版本返回 `404`；后续编辑、清空和刷新页面都不影响已发布的公告；发布响应只落在公告卡内，**不改写编辑区**；
+- **跨重启保留**：公告存于 SQLite（默认 `data/bulletins.db`，可用环境变量 `BULLETIN_DB_PATH` 覆盖；Compose 部署时写入命名数据卷 `bulletin-data`）；
+- **精确性**：公告编号按原样文本保存（任意长的数字串不截断），记录秒数与用时按任意精度整数处理。
+
+公告卡独立于裁决生命周期：不随输入变化清除，也不要求当前存在合法结果——所有校验都在服务端按快照独立完成。
+
 ## 一键启动（Docker Compose）
 
 ```bash
@@ -66,6 +80,8 @@ docker compose up --build
 启动后浏览器访问：
 
 - **http://localhost:8000**
+
+成绩公告保存在命名数据卷 `bulletin-data`（容器内 `/data/bulletins.db`）中，停止、重启甚至重新构建容器后仍然保留；`docker compose down -v` 会连同数据卷一起删除公告。
 
 停止：
 
@@ -103,6 +119,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 6. 合法结果顶部展示**比赛名次表**，可在名次表下方为每名选手保存罚秒与原因，保存后名次立即重排，无需重新裁决；详见下节。
 7. 结果区底部提供**“🔎 检查替代性”**：以当前完整裁决输入经 HTTP 诊断各选手的**未采纳记录**（详见“替代性诊断”节）。每次重算（含输入未变的手动重算）都会清除旧诊断并暂时禁止检查，最新合法结果出来后方可重新检查。
 8. 诊断卡下方提供**“🧭 查找漏读”**：以当前完整裁决输入经 HTTP 推测“只补一条读数就能多完成一趟”的时间窗（详见“查找漏读”节）。与诊断同款生命周期：输入一改或重新计算即清除，最新合法结果出来后方可重新查询。
+9. 页面底部的**“成绩公告”**卡可发布只读公告：填写非空公告编号后点击**“📣 发布成绩公告”**，以点击时的完整输入、隔离、已保存复核与罚秒快照经 HTTP 发布；服务端重新裁决并逐趟核对复核（每趟均须“通过”，零次无需复核），版本匹配才保存并返回公告链接（详见“成绩公告”节）。公告卡独立于裁决生命周期，发布响应不改写编辑区。
 
 ## 设备日志导入（UTF-8 CSV，HTTP 预览 → 确认后才追加）
 
@@ -434,6 +451,106 @@ curl -s -X POST http://localhost:8000/api/import/preview \
 - 同 ID 内容冲突、文件内同 ID 冲突、未知选手、非法行、合并后超过 40 条、CSV/编码/表头非法等任何情形：`422 {"ok": false, "error": "中文原因（含行号）"}`，**不返回任何部分新增**；缺少 `file` 返回 `400`，缺少或损坏 `context` 返回 `422`；
 - 端点是**只读**的：服务端不保存任何状态，真正的追加发生在页面确认之后；页面确认前还会核对当前输入、文件身份与返回清单均与预览一致。
 
+### `POST /api/bulletins/publish`（发布成绩公告）
+
+请求体为点击时的完整快照：
+
+```json
+{
+  "number": "2026-001",
+  "baseVersion": 0,
+  "input": {
+    "standards": {"smMin": 10, "smMax": 60, "mfMin": 10, "mfMax": 60},
+    "runners": [{"number": 101}],
+    "records": [
+      {"id": "a1", "runner": 101, "gate": "S", "time": 0},
+      {"id": "b1", "runner": 101, "gate": "M", "time": 12},
+      {"id": "c1", "runner": 101, "gate": "F", "time": 25}
+    ],
+    "excludedIds": []
+  },
+  "reviews": [
+    {
+      "runner": "101",
+      "records": [
+        {"id": "a1", "gate": "S", "time": "0"},
+        {"id": "b1", "gate": "M", "time": "12"},
+        {"id": "c1", "gate": "F", "time": "25"}
+      ],
+      "status": "pass",
+      "note": "确认无误"
+    }
+  ],
+  "penalties": [{"runner": "101", "seconds": 3, "reason": "设备误触"}]
+}
+```
+
+- `number`：**非空公告编号**（字符串，去首尾空白；JSON 整数按十进制文本接受），按原样文本保存，任意长的数字串都精确；
+- `baseVersion`：**所见公告版本**（非负整数，首次发布为 0）；与当前最新版本一致才保存为下一版本，否则 `409`；
+- `input`：完整裁决输入，形状与校验同 `POST /api/adjudicate`（含可选 `excludedIds`）；服务端**重新裁决**，不信任任何页面缓存结果；
+- `reviews`：已保存复核（可缺省为空数组）：每条按 `runner` + 三条记录的 `id`/`gate`/`time` 匹配被采纳的趟；**每趟均须 `status: "pass"`**（零次选手无需复核），`note` 至多 200 字；不匹配、重复、未知选手或非“通过”都整次拒绝（`422`）；
+- `penalties`：已保存罚秒（可缺省为空数组）：`seconds` 非负整数、`reason` 至多 200 字、罚秒大于 0 时原因必填；未知选手处罚或重复处罚整次拒绝（`422`）。
+
+```bash
+curl -s -X POST http://localhost:8000/api/bulletins/publish \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "number": "2026-001",
+    "baseVersion": 0,
+    "input": {
+      "standards": {"smMin": 10, "smMax": 60, "mfMin": 10, "mfMax": 60},
+      "runners": [{"number": 101}],
+      "records": [
+        {"id": "a1", "runner": 101, "gate": "S", "time": 0},
+        {"id": "b1", "runner": 101, "gate": "M", "time": 12},
+        {"id": "c1", "runner": 101, "gate": "F", "time": 25}
+      ]
+    },
+    "reviews": [
+      {"runner": "101",
+       "records": [{"id": "a1", "gate": "S", "time": 0},
+                   {"id": "b1", "gate": "M", "time": 12},
+                   {"id": "c1", "gate": "F", "time": 25}],
+       "status": "pass", "note": "确认无误"}
+    ],
+    "penalties": [{"runner": "101", "seconds": 3, "reason": "设备误触"}]
+  }'
+```
+
+成功：`200 {"ok": true, "result": {"number": "2026-001", "version": 1, "url": "/api/bulletins/2026-001?version=1"}}`；过期：`409 {"ok": false, "error": "…", "currentVersion": 1}`；校验失败：`422 {"ok": false, "error": "中文原因"}`；请求体不是 JSON：`400`。**任何失败都不留版本、也不改动现有公告。**
+
+### `GET /api/bulletins/{number}`（读取成绩公告，只读）
+
+按编号读取公告；可选查询参数 `version` 指定版本，**缺省读最新版本**：
+
+```bash
+# 最新版本
+curl -s http://localhost:8000/api/bulletins/2026-001
+
+# 指定版本（旧版永久只读）
+curl -s 'http://localhost:8000/api/bulletins/2026-001?version=1'
+```
+
+```json
+{
+  "ok": true,
+  "result": {
+    "number": "2026-001",
+    "version": 1,
+    "publishedAt": "2026-10-06T08:39:58.833582+00:00",
+    "input": {"standards": {"smMin": 10, "smMax": 60, "mfMin": 10, "mfMax": 60}, "runners": [], "records": []},
+    "adjudication": {"runners": [{"runner": 101, "lapCount": 1, "totalTime": 25, "laps": [], "unused": [], "excluded": []}]},
+    "reviews": [{"runner": 101, "records": [], "status": "pass", "note": "确认无误"}],
+    "penalties": [{"runner": 101, "seconds": 3, "reason": "设备误触"}],
+    "ranking": [{"runner": 101, "lapCount": 1, "totalTime": 25, "penalty": 3, "adjusted": 28, "rank": 1}]
+  }
+}
+```
+
+- 响应包含发布时保存的完整快照：`input`（完整裁决输入）、`adjudication`（服务端重新裁决的采纳方案）、`reviews`、`penalties` 与按原规则生成的 `ranking`；编号、记录秒数与用时以精确 JSON 数字/原样字符串返回，任意大整数不截断；
+- 未知编号或版本：`404 {"ok": false, "error": "公告不存在"}`；版本号不是正整数：`400`；
+- 公告存于 SQLite（默认 `data/bulletins.db`，环境变量 `BULLETIN_DB_PATH` 可覆盖；Compose 部署为命名数据卷 `bulletin-data`），跨重启保留；旧版本永久只读，后续编辑、清空与刷新页面都不影响已发布的公告。
+
 ## 测试
 
 ```bash
@@ -514,20 +631,38 @@ node test_exclusion_lifecycle.js
 
 覆盖：完整行隔离按钮可用/空行禁用、隔离后自动防抖重裁且裁决/诊断/漏读载荷都携带 `excludedIds`（按记录行序、不重复）、结果“隔离记录”与普通未采纳分列、隔离采纳记录后计次下降与重新纳入恢复、全部隔离按零次且原始读数不删除、任一绑定值（ID/编号/门/秒数）改变即解除且改回不恢复、前导零等值写法保留隔离、删行解除补回不恢复、重排与无关编辑保留、切换立即清除旧结果/诊断/漏读卡且迟到成功与断网失败均不回写、隔离不释放罚秒、清空/填入示例清除全部隔离、超过 2^53 的秒数精确绑定（相差 1 即解除）、同 ID 出现多行立即解除且恢复唯一后不恢复。
 
+成绩公告的发布、核对、版本控制与读取：
+
+```bash
+python3 test_bulletin.py
+```
+
+覆盖：发布成功返回公告链接并按编号读取（缺省最新、可指定版本）、名次按原规则在服务端生成（罚秒改变名次、并列共享名次跳号 1/1/3、零次者末尾无名次）、复核逐趟核对（未复核/存疑/缺趟/记录 ID/门/秒数不符/未知选手/重复均 422 且不留版本）、零次选手无需复核、罚秒与原因沿用原校验（未知选手处罚整次拒绝）、版本匹配才保存（过期 409 含 `currentVersion`、旧版永久只读、失败不留版本也不改现公告）、同版本并发发布只有一项成功、未知编号/版本 404 与非法版本参数 400、公告编号/记录秒数/用时超过 2^53 全程精确、隔离记录随快照提交且服务端按未隔离记录重新裁决、SQLite 跨重启保留、请求校验（空编号/缺字段/非数组），以及 `/api/adjudicate` 旧合同不变。
+
+前端成绩公告生命周期（同样仅需 Node.js）：
+
+```bash
+node test_bulletin_lifecycle.js
+```
+
+覆盖：公告卡独立常驻（初始即显示、不随输入非法隐藏）、空编号客户端拦截不发请求、点击时快照提交完整输入（含 `excludedIds`）/复核（选手 + 三条记录 ID/门/秒数 + 状态备注）/罚秒且首次所见版本为 0、成功后显示公告链接并追踪所见版本（再次发布基于新版本）、409 采用服务端 `currentVersion` 后可再发布成功、422/断网只在公告卡报错、loading 期间按钮与输入禁用且重复点击/直接调用不再发请求、发布响应不改写编辑区/结果区/复核/罚秒、在途时输入变更迟到的成功只落在公告卡、存疑复核按原样提交、隔离记录随快照提交、超过 2^53 的公告编号/选手编号/记录秒数在快照与链接中全程精确。
+
 ## 目录结构
 
 ```
 .
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml          # 含命名数据卷 bulletin-data（公告 SQLite 跨重启保留）
 ├── requirements.txt
 ├── README.md
 ├── app/
 │   ├── __init__.py
 │   ├── adjudication.py   # 输入校验 + 裁决 DP + 替代性诊断 DP + 查找漏读区间算法
 │   ├── merge.py          # 设备日志 CSV 解析与合并预览（去重/冲突/整批拒绝）
+│   ├── bulletin.py       # 成绩公告：发布核对（重新裁决/复核/罚秒/名次）+ SQLite 版本化存储
 │   └── main.py           # FastAPI 入口：/api/adjudicate、/api/diagnose、/api/missing、
-│                         #   /api/import/preview、/api/import/confirm 与静态资源
+│                         #   /api/import/preview、/api/import/confirm、
+│                         #   /api/bulletins/publish、/api/bulletins/{number} 与静态资源
 ├── static/
 │   ├── index.html
 │   ├── styles.css
@@ -536,10 +671,12 @@ node test_exclusion_lifecycle.js
 ├── test_merge.py               # 设备日志合并解析与端点测试
 ├── test_missing.py             # 查找漏读算法与端点测试（含逐秒暴力对拍）
 ├── test_exclusion.py           # 可疑记录隔离（excludedIds）算法与端点测试
+├── test_bulletin.py            # 成绩公告发布/核对/版本控制/读取测试
 ├── test_review_lifecycle.js    # 前端复核失效时序测试
 ├── test_ranking_lifecycle.js   # 前端名次表与罚秒测试
 ├── test_diagnose_lifecycle.js  # 前端替代性诊断生命周期测试
 ├── test_import_lifecycle.js    # 前端设备日志导入生命周期测试
 ├── test_missing_lifecycle.js   # 前端查找漏读生命周期测试
-└── test_exclusion_lifecycle.js # 前端可疑记录隔离生命周期测试
+├── test_exclusion_lifecycle.js # 前端可疑记录隔离生命周期测试
+└── test_bulletin_lifecycle.js  # 前端成绩公告发布卡生命周期测试
 ```

@@ -504,6 +504,22 @@ input:focus, select:focus {
 }
 .import-action-hint { color: var(--muted); font-size: 0.8rem; }
 
+/* ---------- 成绩公告 ---------- */
+#bulletin-box .diag-intro {
+  margin: 0 0 0.7rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+.bulletin-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+.bulletin-number { width: 16rem; }
+.bulletin-status { margin-top: 0.7rem; }
+.bulletin-link { color: var(--brand); font-weight: 600; word-break: break-all; }
+
 .footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 1rem; }
 
 @media (max-width: 560px) {
