@@ -102,10 +102,40 @@
     <div id="results"></div>
     <div id="diagnosis-box" hidden></div>
     <div id="missing-box" hidden></div>
+
+    <section class="card" id="bulletin-card">
+      <div class="section-head">
+        <h2>成绩公告（把已全部“通过”复核的裁决发布为独立只读快照）</h2>
+      </div>
+      <p class="hint">
+        点击<strong>“发布公告”</strong>时按当时页面所见提交快照：完整裁决输入（含隔离）、已保存的“通过”复核、
+        罚秒与原因，以及<strong>所见版本</strong>（首次为 0）。服务端会<strong>重新裁决</strong>并按选手、
+        三条记录的 ID/门/秒数与区间核对复核：每名有计次选手的每一趟都须为“通过”（0 次无需复核），
+        未知选手处罚、复核不匹配或备注/罚秒校验不过均整次拒绝；名次由服务端按原规则重新生成。
+        版本匹配才保存为下一版本；同版本并发发布只有一项成功，过期返回 409，失败不留版本也不改现公告。
+        公告经 SQLite 与 Docker 数据卷跨重启保留；旧版本永久只读，之后的编辑、清空与刷新不影响公告，发布响应也不改写上方编辑区。
+      </p>
+      <div class="bulletin-controls">
+        <label>公告编号
+          <input type="text" id="bulletin-id" class="bulletin-id-input" maxlength="100" placeholder="非空公告编号，如 G2026-决赛-01" />
+        </label>
+        <label>所见版本
+          <input type="number" id="bulletin-expected" class="bulletin-version-input" min="0" step="1" value="0" />
+        </label>
+        <button type="button" class="btn primary" id="bulletin-publish-btn">📢 发布公告</button>
+        <button type="button" class="btn secondary" id="bulletin-read-btn">读取最新</button>
+        <label class="bulletin-version-read">读取版本（留空读最新）
+          <input type="number" id="bulletin-read-version" class="bulletin-version-input" min="0" step="1" value="" placeholder="留空=最新" />
+        </label>
+      </div>
+      <div id="bulletin-message" class="bulletin-message" hidden></div>
+      <div id="bulletin-view" class="bulletin-view-slot"></div>
+    </section>
   </main>
 
   <footer class="footer">本地运行 · 数据不离开本机 · FastAPI + 原生 HTML/CSS/JavaScript</footer>
 
+  <script src="/bulletin-view.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

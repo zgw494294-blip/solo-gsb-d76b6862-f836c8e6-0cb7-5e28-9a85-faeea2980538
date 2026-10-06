@@ -510,3 +510,49 @@ input:focus, select:focus {
   .range-row label { min-width: 100%; }
   .result-meta { margin-left: 0; }
 }
+
+/* ---------- 成绩公告（发布 + 只读快照） ---------- */
+.bulletin-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+.bulletin-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+.bulletin-id-input { width: 17rem; max-width: 100%; }
+.bulletin-version-input { width: 8rem; }
+.bulletin-version-read { white-space: nowrap; }
+.bulletin-message {
+  margin-top: 0.7rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.88rem;
+}
+.bulletin-ok { background: var(--ok-bg); border: 1px solid #a7f3d0; color: var(--ok); }
+.bulletin-error { background: var(--err-bg); border: 1px solid #fecaca; color: var(--err); }
+.bulletin-link { word-break: break-all; }
+.bulletin-view-slot { margin-top: 0.8rem; }
+.bulletin-view-slot .card,
+#bulletin-view .card,
+#bulletin-view .result-card { margin-bottom: 0.9rem; }
+.bulletin-banner {
+  background: linear-gradient(135deg, #1e3a8a, #1d4ed8);
+  color: #fff;
+  border-radius: 10px;
+  padding: 0.9rem 1.2rem;
+  margin-bottom: 1rem;
+}
+.bulletin-banner-head { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+.bulletin-banner-head h2 { margin: 0; font-size: 1.15rem; }
+.bulletin-banner .hint { color: rgba(255, 255, 255, 0.88); margin: 0.3rem 0 0; }
+.bulletin-banner .badge { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.bulletin-banner .badge.ok { background: #047857; }
+.readonly-review { background: #f8fafc; }
+.excluded-row td { color: var(--muted); }
+.excluded-row td:last-child { color: var(--warn); font-weight: 600; }

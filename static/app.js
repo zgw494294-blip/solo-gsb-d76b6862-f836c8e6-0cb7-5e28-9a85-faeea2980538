@@ -866,9 +866,10 @@ function computeRanking(runners) {
   const rows = runners.map((r) => {
     const saved = penalties.get(r.runner);
     const penalty = saved ? saved.seconds : 0;
+    const penaltyText = penaltySecondsText(saved);
     // 原总用时是规范十进制字符串（任意精度）；调整后用时按十进制精确相加，
     // 不经过 Number，避免超过 2^53 的总用时在名次比较中被截断。
-    const adjustedText = (BigInt(r.totalTime) + BigInt(penalty)).toString();
+    const adjustedText = (BigInt(r.totalTime) + BigInt(penaltyText)).toString();
     return {
       runner: r.runner,
       lapCount: r.lapCount,
@@ -982,13 +983,25 @@ resultsBox.addEventListener("click", (e) => {
     fail("罚秒大于 0 时必须填写原因");
     return;
   }
-  penalties.set(runner, { seconds, reason });
+  penalties.set(runner, { seconds, secondsText: secondsText, reason });
   errEl.hidden = true;
   box.querySelector(".penalty-current").innerHTML = penaltyCurrentText({ seconds, reason });
   // 罚秒只影响名次表：立即按当前已保存的罚秒重排名次，不触发重新裁决。
   const slot = resultsBox.querySelector(".ranking-table-slot");
   if (slot && latestResult) slot.innerHTML = rankingTableHtml(latestResult);
 });
+
+// 罚秒以规范十进制字符串保存（secondsText）：任意大罚秒与任意大总用时相加都不
+// 经过 Number；seconds（Number）保留给旧测试与界面“秒数不大”的展示路径。
+function penaltySecondsText(saved) {
+  if (!saved) return "0";
+  if (typeof saved.secondsText === "string" && /^\d+$/.test(saved.secondsText)) {
+    return saved.secondsText;
+  }
+  return typeof saved.seconds === "number" && Number.isSafeInteger(saved.seconds)
+    ? String(saved.seconds)
+    : "0";
+}
 
 /* ---------- 结果渲染 ---------- */
 
@@ -1964,6 +1977,234 @@ function eventTargetsImport(e) {
       typeof importBox.contains === "function" &&
       importBox.contains(e.target))
   );
+}
+
+/* ---------- 成绩公告：发布独立只读快照（服务端重新裁决、SQLite 持久化） ---------- */
+
+// 公告编号 -> 页面“所见版本”。首次为 0；仅发布成功后才前进到新版本。
+// 409（过期）不更新它：页面须先“读取最新”再决定重发。切换编号时：
+// 若该编号本页面已见过（map 中有值）恢复到所见版本，否则重置为 0。
+const bulletinSeenVersions = new Map();
+
+const bulletinIdEl = document.getElementById("bulletin-id");
+const bulletinExpectedEl = document.getElementById("bulletin-expected");
+const bulletinPublishBtn = document.getElementById("bulletin-publish-btn");
+const bulletinReadBtn = document.getElementById("bulletin-read-btn");
+const bulletinReadVersionEl = document.getElementById("bulletin-read-version");
+const bulletinMessageEl = document.getElementById("bulletin-message");
+const bulletinViewEl = document.getElementById("bulletin-view");
+
+if (typeof globalThis !== "undefined") {
+  globalThis.__bulletinSeenVersionsForTest = bulletinSeenVersions;
+  globalThis.__publishBulletinForTest = () => runBulletinPublish();
+  globalThis.__readBulletinForTest = () => runBulletinRead();
+}
+
+function bulletinShowMessage(kind, html) {
+  if (!bulletinMessageEl) return;
+  bulletinMessageEl.className = `bulletin-message bulletin-${kind}`;
+  bulletinMessageEl.innerHTML = html;
+  bulletinMessageEl.hidden = false;
+}
+
+function bulletinClearMessage() {
+  if (!bulletinMessageEl) return;
+  bulletinMessageEl.hidden = true;
+  bulletinMessageEl.textContent = "";
+}
+
+// 从复核绑定键还原服务端核对所需的复核条目（键由规范化后的响应生成，精度无损）。
+// 只发送“通过”复核——未复核/存疑趟发布时由服务端按“缺少通过复核”拒绝。
+function collectReviewSnapshots() {
+  const out = [];
+  for (const [key, saved] of reviews.entries()) {
+    if (!saved || saved.status !== "pass") continue;
+    let parts;
+    try {
+      parts = JSON.parse(key);
+    } catch (err) {
+      continue;
+    }
+    const [
+      runner,
+      [sId, , sTime],
+      [mId, , mTime],
+      [fId, , fTime],
+      smTime,
+      mfTime,
+    ] = parts;
+    out.push({
+      runner,
+      start: { id: sId, gate: "S", time: sTime },
+      middle: { id: mId, gate: "M", time: mTime },
+      finish: { id: fId, gate: "F", time: fTime },
+      smTime,
+      mfTime,
+      status: "pass",
+      note: saved.note,
+    });
+  }
+  return out;
+}
+
+// 已保存罚秒快照：以规范十进制字符串发送秒数（任意大罚秒无损），按编号数值升序。
+function collectPenaltySnapshots() {
+  const entries = [];
+  for (const [runner, saved] of penalties.entries()) {
+    entries.push({ runner, seconds: penaltySecondsText(saved), reason: saved.reason });
+  }
+  entries.sort((a, b) => cmpRunnerNumbers(a.runner, b.runner));
+  return entries;
+}
+
+// 点击时快照：读取并冻结此刻的完整裁决输入、复核、罚秒与所见版本，
+// 等待响应期间用户继续编辑不会改变本次提交内容，也不会被响应回写。
+function buildBulletinPublishPayload(id, expectedVersion) {
+  const snapshot = collectPayload();
+  return {
+    bulletinId: id,
+    expectedVersion,
+    standards: snapshot.standards,
+    runners: snapshot.runners,
+    records: snapshot.records,
+    excludedIds: snapshot.excludedIds,
+    reviews: collectReviewSnapshots(),
+    penalties: collectPenaltySnapshots(),
+  };
+}
+
+async function runBulletinPublish() {
+  if (!bulletinIdEl || !bulletinExpectedEl) return;
+  const id = bulletinIdEl.value.trim();
+  if (id === "") {
+    bulletinShowMessage("error", "⚠ 公告编号不能为空；未发布任何版本。");
+    return;
+  }
+  const expectedText = bulletinExpectedEl.value.trim();
+  if (!/^\d+$/.test(expectedText)) {
+    bulletinShowMessage("error", "⚠ 所见版本必须是非负整数（首次发布为 0）。");
+    return;
+  }
+  const expectedVersion = Number(expectedText);
+  // 关键：请求体在点击的此刻一次性快照，后续编辑不改写它。
+  const payload = buildBulletinPublishPayload(id, expectedVersion);
+  bulletinPublishBtn.disabled = true;
+  bulletinClearMessage();
+  if (bulletinViewEl) bulletinViewEl.innerHTML = globalThis.BulletinView.loadingHtml();
+
+  let resp;
+  let data;
+  try {
+    resp = await fetch("/api/bulletins", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    data = globalThis.BulletinView.parseJsonLossless(await resp.text());
+  } catch (err) {
+    bulletinPublishBtn.disabled = false;
+    bulletinShowMessage("error", `⚠ 无法连接公告服务：${escapeHtml(err.message)}；未发布任何版本。`);
+    return;
+  }
+  bulletinPublishBtn.disabled = false;
+  if (resp.status === 409 || (data && data.ok === false && resp.status === 409)) {
+    // 过期：不改“所见版本”、不改编辑区；提示读取最新版本。
+    const latest = data && typeof data.latestVersion === "number" ? data.latestVersion : null;
+    bulletinShowMessage(
+      "error",
+      `⚠ 发布被拒绝（409 版本过期）：公告“${escapeHtml(id)}”已有更新版本` +
+        (latest !== null ? `（服务端最新为第 ${latest} 版）` : "") +
+        `。本次未产生新版本，现公告与编辑区均未改动；请先<strong>读取最新</strong>核对后，把“所见版本”改为最新版本再发布。`
+    );
+    return;
+  }
+  if (!resp.ok || !data.ok) {
+    // 输入/复核/罚秒整次拒绝：不留版本、不改现公告、不改编辑区。
+    bulletinShowMessage(
+      "error",
+      `⚠ 发布被拒绝（HTTP ${resp.status}）：${escapeHtml((data && data.error) || "未知错误")}；未产生新版本，编辑区未改动。`
+    );
+    return;
+  }
+  const result = data.result;
+  // 仅成功才推进“所见版本”。
+  bulletinSeenVersions.set(id, result.version);
+  bulletinExpectedEl.value = String(result.version);
+  if (bulletinReadVersionEl) bulletinReadVersionEl.value = String(result.version);
+  const linkText = (u) => `<a href="${globalThis.BulletinView.escapeHtml(u)}" class="bulletin-link">${globalThis.BulletinView.escapeHtml(u)}</a>`;
+  bulletinShowMessage(
+    "ok",
+    `✓ 已发布公告“${escapeHtml(id)}”第 <strong>${result.version}</strong> 版：` +
+      `本版链接 ${linkText(result.viewUrl)}（JSON ${linkText(result.url)}）；` +
+      `后续编辑、清空与刷新均不影响本版，编辑区未被改写。`
+  );
+  if (bulletinViewEl) {
+    try {
+      bulletinViewEl.innerHTML = globalThis.BulletinView.renderBulletinSnapshot(result);
+    } catch (err) {
+      bulletinViewEl.innerHTML = globalThis.BulletinView.errorHtml(err.message);
+    }
+  }
+}
+
+async function runBulletinRead() {
+  if (!bulletinIdEl) return;
+  const id = bulletinIdEl.value.trim();
+  if (id === "") {
+    bulletinShowMessage("error", "⚠ 请先填写公告编号再读取。");
+    return;
+  }
+  const vRaw = bulletinReadVersionEl ? bulletinReadVersionEl.value.trim() : "";
+  if (vRaw !== "" && !/^\d+$/.test(vRaw)) {
+    bulletinShowMessage("error", "⚠ 读取版本必须是非负整数，或留空读取最新。");
+    return;
+  }
+  bulletinClearMessage();
+  if (bulletinViewEl) bulletinViewEl.innerHTML = globalThis.BulletinView.loadingHtml();
+  let outcome;
+  try {
+    outcome = await globalThis.BulletinView.fetchBulletin(id, vRaw);
+  } catch (err) {
+    bulletinViewEl.innerHTML = globalThis.BulletinView.errorHtml(`无法连接公告服务：${err.message}`);
+    return;
+  }
+  if (outcome.status === 404) {
+    bulletinViewEl.innerHTML = globalThis.BulletinView.errorHtml(
+      vRaw === ""
+        ? `公告“${id}”不存在（尚无任何版本）。`
+        : `公告“${id}”不存在或没有第 ${vRaw} 版。`
+    );
+    return;
+  }
+  if (outcome.status !== 200 || !outcome.data.ok) {
+    bulletinViewEl.innerHTML = globalThis.BulletinView.errorHtml(
+      (outcome.data && outcome.data.error) || `读取失败（HTTP ${outcome.status}）`
+    );
+    return;
+  }
+  const snap = outcome.data.result;
+  // 读取（尤其读到最新）只更新“所见版本”输入框，方便下次发布；不改写任何编辑区。
+  bulletinSeenVersions.set(id, snap.latestVersion);
+  if (bulletinExpectedEl) bulletinExpectedEl.value = String(snap.latestVersion);
+  try {
+    bulletinViewEl.innerHTML = globalThis.BulletinView.renderBulletinSnapshot(snap);
+  } catch (err) {
+    bulletinViewEl.innerHTML = globalThis.BulletinView.errorHtml(err.message);
+  }
+}
+
+// 公告卡位于 <form> 之外，但其内输入/按钮事件可能在冒泡链上；该卡是独立功能，
+// 不触发赛道输入重算（eventTargetsImport 只守卫导入卡，这里再独立守卫公告卡）。
+// 实际 DOM 中公告卡已在 form 外，form 的监听不会收到这些事件，无需额外处理。
+if (bulletinIdEl) {
+  bulletinIdEl.addEventListener("input", () => {
+    // 切换编号：恢复本页面对该编号的所见版本；未见过的编号首次为 0。
+    const id = bulletinIdEl.value.trim();
+    const seen = id === "" ? null : bulletinSeenVersions.get(id);
+    bulletinExpectedEl.value = String(seen === undefined ? 0 : seen);
+  });
+  bulletinPublishBtn.addEventListener("click", runBulletinPublish);
+  bulletinReadBtn.addEventListener("click", runBulletinRead);
 }
 
 /* ---------- 工具 ---------- */

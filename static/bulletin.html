@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>成绩公告（只读）· 本地赛道计次裁决台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>成绩公告（只读）</h1>
+    <p class="subtitle">服务端保存的不可变裁决快照：旧版本永久只读，后续编辑、清空与刷新均不影响公告</p>
+  </header>
+  <main id="bulletin-view"></main>
+  <footer class="footer">本地运行 · 数据不离开本机 · 成绩公告经 SQLite 与 Docker 数据卷跨重启保留</footer>
+  <script src="/bulletin-view.js"></script>
+</body>
+</html>

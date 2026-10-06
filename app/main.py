@@ -1,4 +1,4 @@
-"""FastAPI 入口：提供裁决 API、设备日志合并预览 API 与静态页面。"""
+"""FastAPI 入口：提供裁决 API、设备日志合并预览 API、成绩公告发布/只读 API 与静态页面。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,16 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .adjudication import AdjudicationError, adjudicate, diagnose, find_missing
+from .bulletins import (
+    BulletinConflict,
+    BulletinError,
+    BulletinNotFound,
+    get_bulletin_latest,
+    get_bulletin_version,
+    publish_bulletin,
+    build_publication,
+    validate_bulletin_id,
+)
 from .merge import MergeError, preview_merge
 
 app = FastAPI(title="本地赛道计次裁决台", version="1.3.0")
@@ -122,6 +132,75 @@ async def api_import_confirm(
     只有输入与预览所依据的当前记录、文件内容一致时结果才会与预览相同。
     """
     return await _handle_merge_request(context, file)
+
+
+# ---------------------------------------------------------------------------
+# 成绩公告：把“通过复核”的裁决发布为独立只读快照（SQLite 持久化、乐观版本）
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/bulletins")
+async def api_bulletin_publish(request: Request) -> JSONResponse:
+    """发布成绩公告：点击时快照（完整裁决输入/隔离/复核/罚秒/所见版本）提交，
+    服务端重新裁决、核对复核与罚秒、重新生成名次；仅当版本匹配才落库下一版本。
+    同版本并发只有一项成功，过期返回 409；失败不留版本、不改现公告。
+    """
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400, content={"ok": False, "error": "请求体不是合法的 JSON"}
+        )
+    try:
+        prepared = build_publication(payload)
+        saved = publish_bulletin(prepared)
+    except BulletinConflict as exc:
+        # 期望版本过期：返回服务端当前版本，页面须重新读取最新公告后再决定。
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "error": "公告版本已过期：同一编号已有更新的公告版本，请读取最新版本后重新发布",
+                "latestVersion": int(exc.args[0]),
+            },
+        )
+    except BulletinError as exc:
+        return JSONResponse(status_code=422, content={"ok": False, "error": str(exc)})
+    return JSONResponse(content={"ok": True, "result": saved})
+
+
+def _read_bulletin(bid_text: str, version_text: str | None) -> JSONResponse:
+    try:
+        bid = validate_bulletin_id(bid_text)
+        if version_text is not None:
+            # 版本必须是非负整数；任何其他写法（含非数字、负数）都按“未知版本”404。
+            if not version_text.isdigit():
+                raise BulletinNotFound
+            version: int | None = int(version_text)
+        else:
+            version = None
+        out = get_bulletin_latest(bid) if version is None else get_bulletin_version(bid, version)
+    except BulletinError:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "公告不存在"})
+    except BulletinNotFound:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "公告不存在"})
+    out["url"] = f"/api/bulletins/{bid}/versions/{out['version']}"
+    out["latestUrl"] = f"/api/bulletins/{bid}"
+    out["viewUrl"] = f"/bulletin.html?id={bid}&version={out['version']}"
+    out["latestViewUrl"] = f"/bulletin.html?id={bid}"
+    return JSONResponse(content={"ok": True, "result": out})
+
+
+@app.get("/api/bulletins/{bid}")
+async def api_bulletin_read_latest(bid: str) -> JSONResponse:
+    """按编号读取公告最新版本（缺省读最新）；未知编号返回 404。旧版本永久只读。"""
+    return _read_bulletin(bid, None)
+
+
+@app.get("/api/bulletins/{bid}/versions/{version}")
+async def api_bulletin_read_version(bid: str, version: str) -> JSONResponse:
+    """按编号与版本读取公告快照；未知编号、未知或非数字版本均返回 404。"""
+    return _read_bulletin(bid, version)
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

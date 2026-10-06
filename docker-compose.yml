@@ -4,4 +4,10 @@ services:
     container_name: lap-judge
     ports:
       - "8000:8000"
+    volumes:
+      # 成绩公告 SQLite 库跨重启持久化（默认库路径 /data/bulletins.db）。
+      - lap-judge-data:/data
     restart: unless-stopped
+
+volumes:
+  lap-judge-data:
