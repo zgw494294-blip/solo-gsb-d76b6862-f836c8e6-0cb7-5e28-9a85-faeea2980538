@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>本地赛道计次裁决台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>本地赛道计次裁决台</h1>
+    <p class="subtitle">起点 S → 中途门 M → 终点 F：按“计次数最多 → 总用时最短 → ID 序列字典序最小”裁决</p>
+  </header>
+
+  <main>
+    <form id="judge-form" novalidate>
+      <section class="card">
+        <h2>1. 合格耗时区间（正整数，闭区间，单位：秒）</h2>
+        <div class="range-grid">
+          <div class="range-row">
+            <label>起点 → 中途门</label>
+            <input type="number" id="smMin" min="1" step="1" value="10" required />
+            <span>～</span>
+            <input type="number" id="smMax" min="1" step="1" value="60" required />
+          </div>
+          <div class="range-row">
+            <label>中途门 → 终点</label>
+            <input type="number" id="mfMin" min="1" step="1" value="10" required />
+            <span>～</span>
+            <input type="number" id="mfMax" min="1" step="1" value="60" required />
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>2. 选手（1～3 名，编号互异的正整数）</h2>
+          <button type="button" id="add-runner" class="btn secondary">＋ 添加选手</button>
+        </div>
+        <div id="runner-rows" class="runner-list"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>3. 感应记录（至多 40 条；ID 唯一，秒数为非负整数）</h2>
+          <div>
+            <span id="record-count" class="count-pill">0 / 40</span>
+            <button type="button" id="add-record" class="btn secondary">＋ 添加记录</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="record-table">
+            <thead>
+              <tr>
+                <th style="width:7rem">记录 ID</th>
+                <th style="width:8rem">选手编号</th>
+                <th style="width:8rem">门</th>
+                <th style="width:8rem">秒数</th>
+                <th style="width:5.5rem">隔离</th>
+                <th style="width:3rem"></th>
+              </tr>
+            </thead>
+            <tbody id="record-rows"></tbody>
+          </table>
+        </div>
+        <p class="hint">记录可乱序、同一秒可有多条；全空行会自动忽略，部分填写视为非法。</p>
+        <p class="hint">
+          可疑记录可点行内<strong>“隔离”</strong>暂时退出计算（原始读数仍留在表中，不删除），切换后自动重裁，
+          结果中单列“隔离记录”，与普通未采纳记录分开；再点<strong>“重新纳入”</strong>恢复。
+          隔离绑定 ID、选手编号、门与秒数（去空白与整数等值比较）：任一绑定值改变或删行即解除，改回不恢复；
+          重排与无关编辑保留，清空、填入示例或刷新清除。全部隔离按零次处理；设备日志合并仍对完整原表去重与计数，隔离不能跳过冲突或绕过 40 条上限。
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>4. 从设备日志导入（UTF-8 CSV，表头 id,runner,gate,time，支持引号）</h2>
+        </div>
+        <div class="import-controls">
+          <input type="file" id="import-file" accept=".csv,text/csv" />
+          <button type="button" class="btn secondary" id="import-preview-btn" disabled>预览合并</button>
+          <span id="import-file-name" class="import-file-name">未选择文件</span>
+        </div>
+        <p class="hint">
+          选择文件后经 HTTP 预览新增与重复条目，确认后才追加到上方记录表；
+          同 ID 且内容（选手编号、门、秒数）一致自动跳过，内容冲突、未知选手、非法行或合并后超过 40 条将整批拒绝。
+          预览期间仍可编辑；任一赛道输入或上传文件变化，预览立即失效。
+        </p>
+        <div id="import-box" class="import-box" hidden></div>
+      </section>
+
+      <div class="actions">
+        <button type="submit" class="btn primary" id="submit-btn">⚖ 裁决 / 重新计算</button>
+        <button type="button" class="btn ghost" id="sample-btn">填入示例</button>
+        <button type="button" class="btn ghost" id="clear-btn">清空</button>
+      </div>
+      <p class="hint">修改任意输入（含增删行、填入示例）后会自动重算，无需点击按钮；上方按钮可随时手动重算。</p>
+    </form>
+
+    <div id="error-box" class="error-box" hidden></div>
+    <div id="pending-hint" class="pending-hint" hidden>正在根据当前输入自动重新计算…</div>
+    <div id="results"></div>
+    <div id="diagnosis-box" hidden></div>
+    <div id="missing-box" hidden></div>
+  </main>
+
+  <footer class="footer">本地运行 · 数据不离开本机 · FastAPI + 原生 HTML/CSS/JavaScript</footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
